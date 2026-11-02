@@ -1,0 +1,23 @@
+{
+  "name": "B_lorma",
+  "data_dir": "data",
+  "tokenizer": "../phase1/ab_inputs/legal_bpe.json",
+  "out_dir": "runs",
+  "phase1_ckpt": "../phase1/ab_inputs/run_B2/best.pt",
+  "fast_attention": true,
+
+  "backbone": {"prefix": null, "encdec_mode": null, "truncate_layers": null, "dropout": null},
+  "preprocess": {"split_punct": null, "tag_scheme": null},
+  "split": {"mode": "random", "val_frac": null, "seed": 0},
+  "window": {"train_len": null, "train_stride": null, "infer_len": null, "infer_stride": null, "merge": null},
+  "head": {"name": null},
+  "technique": {"name": null},
+  "kd": null,
+  "train": {
+    "epochs": null, "batch_size": null, "micro_batch": null, "lr": null, "head_lr": null,
+    "weight_decay": null, "warmup_frac": null, "schedule": null, "grad_clip": null,
+    "class_weights": null, "o_weight": null, "patience": null, "max_minutes": null,
+    "seed": 0, "eval_every_epochs": 1, "log_every": 20, "infer_micro_batch": null
+  },
+  "decode": {"repair": null}
+}

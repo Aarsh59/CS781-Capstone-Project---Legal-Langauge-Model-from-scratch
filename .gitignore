@@ -1,0 +1,14 @@
+# Ignore everything, then allow code, notebooks and docs
+*
+!*/
+!.gitignore
+!*.py
+!*.ipynb
+!*.md
+!phase2/configs/*.json
+
+# Never track these, even if they match above
+.venv/
+__pycache__/
+Assignment3/
+phase1/notebooks/capstone_starter.ipynb
