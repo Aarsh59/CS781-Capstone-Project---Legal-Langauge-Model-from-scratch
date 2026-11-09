@@ -24,24 +24,7 @@ import torch.nn.functional as F
 # attention forward (drop-in for all three hand-written attention classes)
 # ---------------------------------------------------------------------------
 
-def _sdpa_supports_gqa():
-    """PyTorch >= 2.5: scaled_dot_product_attention(..., enable_gqa=True) attends with fewer K/V heads directly."""
-    try:
-        q = torch.zeros(1, 4, 2, 8)
-        kv = torch.zeros(1, 2, 2, 8)
-        F.scaled_dot_product_attention(q, kv, kv, enable_gqa=True)
-        return True
-    except (TypeError, RuntimeError):
-        return False
-
-
-SDPA_GQA = _sdpa_supports_gqa()
-
-
-def _sdpa(q, k, v, causal, dropout_p, scale, gqa=False):
-    if gqa:
-        return F.scaled_dot_product_attention(q, k, v, is_causal=causal, dropout_p=dropout_p, scale=scale,
-                                              enable_gqa=True)
+def _sdpa(q, k, v, causal, dropout_p, scale):
     return F.scaled_dot_product_attention(q, k, v, is_causal=causal, dropout_p=dropout_p, scale=scale)
 
 
@@ -53,6 +36,7 @@ def _fast_attention_forward(self, x):
     dropout_p = self.attn_dropout.p if self.training else 0.0
 
     q = self.q_proj(x).view(B, T, n_heads, d_head).transpose(1, 2)
+    n_prefix = 0                                            # prefix tuning is only wired for MHA / GQA
 
     if hasattr(self, "kv_down_proj"):                       # MLA: cache the shared latent
         latent = self.kv_down_proj(x)
@@ -76,9 +60,9 @@ def _fast_attention_forward(self, x):
             cache["v"][:, :, start:start + T] = v
             k = cache["k"][:, :, :start + T]
             v = cache["v"][:, :, :start + T]
+        k, v, n_prefix = _add_prefix(self, k, v, B, cache)
         n_rep = n_heads // n_kv
-        use_gqa = n_rep > 1 and SDPA_GQA            # native GQA: no repeated copies of K/V in memory
-        if n_rep > 1 and not use_gqa:
+        if n_rep > 1:
             k = k.repeat_interleave(n_rep, dim=1)
             v = v.repeat_interleave(n_rep, dim=1)
 
@@ -86,9 +70,36 @@ def _fast_attention_forward(self, x):
     causal = T > 1
     if causal and start > 0:
         raise ValueError("multi-token steps are only supported from an empty cache")
-    y = _sdpa(q, k, v, causal, dropout_p, self.attention_scale, gqa=locals().get("use_gqa", False))
+    if n_prefix:                                            # prefix tuning: every query also sees the P prefix keys
+        mask = _causal_with_prefix(T, n_prefix, x.device)
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=dropout_p, scale=self.attention_scale)
+    else:
+        y = _sdpa(q, k, v, causal, dropout_p, self.attention_scale)
     y = y.transpose(1, 2).reshape(B, T, n_heads * d_head)
     return self.resid_dropout(self.out_proj(y))
+
+
+# ---------------------------------------------------------------------------
+# prefix-tuning hook (Phase 3 plumbing): an attention module may carry `prefix_kv`, a callable
+# prefix_kv(batch_size) -> (pk, pv), each (B, n_kv_heads, P, d_head). Those P key/value vectors are prepended to the
+# keys/values (no RoPE is applied to them) and every query may attend to them. Without `prefix_kv`: unchanged.
+# ---------------------------------------------------------------------------
+
+def _add_prefix(attn, k, v, B, cache):
+    fn = getattr(attn, "prefix_kv", None)
+    if fn is None:
+        return k, v, 0
+    assert cache is None, "prefix tuning is not supported together with the generation KV cache"
+    pk, pv = fn(B)
+    assert pk.shape[0] == B and pk.shape[1] == k.shape[1] and pk.shape[3] == k.shape[3], \
+        f"prefix_kv must return (B, n_kv_heads, P, d_head) = ({B}, {k.shape[1]}, P, {k.shape[3]}), got {tuple(pk.shape)}"
+    return torch.cat([pk.to(k.dtype), k], dim=2), torch.cat([pv.to(v.dtype), v], dim=2), pk.shape[2]
+
+
+def _causal_with_prefix(T, P, device):
+    m = torch.ones(T, P + T, dtype=torch.bool, device=device)
+    m[:, P:] = torch.ones(T, T, dtype=torch.bool, device=device).tril()
+    return m
 
 
 def attention_modules(model):
